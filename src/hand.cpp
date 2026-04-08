@@ -176,6 +176,7 @@ void Hand::swap_phase(Street street) {
     auto& players = state_.players();
     auto& record = state_.history().current_hand();
     int cost = state_.swap_cost(street);
+    phase_force_folds_.clear();
 
     // track which players are still eligible for swapping
     std::vector<bool> eligible(state_.num_players(), false);
@@ -271,6 +272,7 @@ void Hand::swap_phase(Street street) {
 void Hand::vote_phase(Street street) {
     auto& players = state_.players();
     auto& record = state_.history().current_hand();
+    phase_force_folds_.clear();
 
     if (count_active() <= 1) return;
 
@@ -380,6 +382,7 @@ void Hand::betting_round(Street street) {
     auto& players = state_.players();
     auto& record = state_.history().current_hand();
     int n = state_.num_players();
+    phase_force_folds_.clear();
 
     // nothing to do if 0 or 1 active players, or nobody can act
     if (count_active() <= 1 || count_can_act() == 0) return;
@@ -656,6 +659,15 @@ void Hand::resolve_pots() {
 
         if (pot_slice == 0) { processed = cap; continue; }
 
+        // order winners by proximity to dealer's left for remainder chips
+        int dealer = state_.dealer_seat();
+        std::sort(winners.begin(), winners.end(), [&](int a, int b) {
+            int nm = state_.num_players();
+            int dist_a = ((a - dealer - 1) % nm + nm) % nm;
+            int dist_b = ((b - dealer - 1) % nm + nm) % nm;
+            return dist_a < dist_b;
+        });
+
         // split pot_slice among winners
         int share = pot_slice / static_cast<int>(winners.size());
         int remainder = pot_slice % static_cast<int>(winners.size());
@@ -698,17 +710,46 @@ bool Hand::check_single_winner() {
     if (active <= 1) {
         if (pot_ > 0) {
             auto& players = state_.players();
-            for (auto& p : players) {
-                if (p.is_active()) {
-                    p.chips += pot_;
+
+            if (active == 1) {
+                // one player left — they win the pot
+                for (auto& p : players) {
+                    if (p.is_active()) {
+                        p.chips += pot_;
+                        auto& record = state_.history().current_hand();
+                        auto& ev = record.add_event_ref(EventType::WINNER, p.seat, current_street_);
+                        ev.amount = pot_;
+                        io_.broadcast("WINNER " + std::to_string(p.seat) + " " +
+                                      std::to_string(pot_) + " FOLD_WIN");
+                        break;
+                    }
+                }
+            } else if (!phase_force_folds_.empty()) {
+                // everyone folded — split pot among players who IO-errored in the last phase
+                // order by proximity to dealer's left for remainder chips
+                int dealer = state_.dealer_seat();
+                std::vector<int> ordered = phase_force_folds_;
+                std::sort(ordered.begin(), ordered.end(), [&](int a, int b) {
+                    int n = state_.num_players();
+                    int dist_a = ((a - dealer - 1) % n + n) % n;
+                    int dist_b = ((b - dealer - 1) % n + n) % n;
+                    return dist_a < dist_b;
+                });
+
+                int n_winners = static_cast<int>(ordered.size());
+                int share = pot_ / n_winners;
+                int remainder = pot_ % n_winners;
+
+                for (int i = 0; i < n_winners; i++) {
+                    int seat = ordered[i];
+                    int award = share + (i < remainder ? 1 : 0);
+                    players[seat].chips += award;
 
                     auto& record = state_.history().current_hand();
-                    auto& ev = record.add_event_ref(EventType::WINNER, p.seat, current_street_);
-                    ev.amount = pot_;
-
-                    io_.broadcast("WINNER " + std::to_string(p.seat) + " " +
-                                  std::to_string(pot_) + " FOLD_WIN");
-                    break;
+                    auto& ev = record.add_event_ref(EventType::WINNER, seat, current_street_);
+                    ev.amount = award;
+                    io_.broadcast("WINNER " + std::to_string(seat) + " " +
+                                  std::to_string(award) + " ERROR_SPLIT");
                 }
             }
             pot_ = 0;
@@ -720,4 +761,5 @@ bool Hand::check_single_winner() {
 
 void Hand::force_fold(int seat) {
     state_.players()[seat].folded = true;
+    phase_force_folds_.push_back(seat);
 }

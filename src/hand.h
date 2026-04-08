@@ -64,4 +64,7 @@ private:
     int current_bet_ = 0;
     int last_raise_size_ = 0;
     Street current_street_ = Street::PREFLOP;
+
+    // tracks players force-folded (IO error) in the current phase
+    std::vector<int> phase_force_folds_;
 };

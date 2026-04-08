@@ -92,7 +92,15 @@ int main(int argc, char* argv[]) {
         state.advance_dealer();
     }
 
-    io.broadcast("GAME_OVER " + std::to_string(state.winner_seat()));
+    if (state.is_tie()) {
+        auto w = state.winners();
+        std::ostringstream oss;
+        oss << "GAME_OVER TIE";
+        for (int seat : w) oss << " " << seat;
+        io.broadcast(oss.str());
+    } else {
+        io.broadcast("GAME_OVER " + std::to_string(state.winner_seat()));
+    }
 
     if (print_history) {
         std::cerr << state.history().pretty_print();

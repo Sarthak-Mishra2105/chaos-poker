@@ -27,7 +27,12 @@ The game is played over multiple hands. Players are eliminated when they run out
 ### 2.3 Blinds
 - The game uses a small blind / big blind structure.
 - Initial small blind = 1, big blind = 2.
-- **Blind escalation**: Blinds double after each full revolution of the dealer button (i.e., after every player has been the dealer once).
+- **Blind escalation**: After each full revolution of the dealer button (i.e., after every player has been the dealer once), the small blind is recalculated as:
+  ```
+  new_small_blind = max(previous_small_blind, min(2 * previous_small_blind, ceil(min_stack / 3)))
+  ```
+  where `min_stack` is the smallest chip stack among non-eliminated players. The big blind is always `2 × small_blind`.
+- This ensures blinds never decrease, try to double each revolution, but are capped so they don't grow large too quickly.
 
 ### 2.4 Swap Costs
 - At the start of the game, four swap cost **multipliers** are announced: one each for pre-flop, flop, turn, and river.
@@ -141,7 +146,8 @@ After the final betting round:
 ## 8. Elimination and Winning
 
 - A player with 0 chips at the start of a hand is eliminated.
-- The game continues until only one player remains. That player wins.
+- The game continues until only one player remains, or until **200 revolutions** of the dealer button have completed.
+- If the game ends by revolution limit, the player with the most chips wins. If multiple players are tied for the most chips, the game is a tie.
 
 ---
 
@@ -341,7 +347,9 @@ ELIMINATE <seat>
 Sent when the game ends.
 ```
 GAME_OVER <winning_seat>
+GAME_OVER TIE <seat1> <seat2> [...]
 ```
+If the game ends by revolution limit and top stacks are tied, the `TIE` form is used.
 
 ---
 
@@ -452,6 +460,7 @@ P1 → Engine:      CHECK
   - The bot is treated as having folded immediately.
   - The bot receives no further prompts for the remainder of that hand.
   - The bot resumes normal play in the next hand.
+- **All-error fold rule**: If every remaining player gets auto-folded due to IO errors, the pot is split equally among the players who errored in the **most recent phase** (swap, vote, or betting). Players who errored in an earlier phase do not receive a share. This prevents the pot from being lost entirely.
 
 ---
 
@@ -463,6 +472,6 @@ P1 → Engine:      CHECK
 | Hole cards | Fixed for the hand | Can be swapped at a cost (including pre-flop) |
 | Voting | N/A | Money-weighted vote after each street |
 | Swap costs | N/A | Per-card cost, varies by street, multiple of small blind |
-| Blinds | Fixed or timed | Start 1/2, double each dealer revolution |
+| Blinds | Fixed or timed | Start 1/2, escalate each revolution capped by min stack |
 | Invalid IO | N/A | Auto-fold for the hand |
 | Response time | N/A | 100ms limit, auto-fold on timeout |

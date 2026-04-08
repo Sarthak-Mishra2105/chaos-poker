@@ -1,5 +1,6 @@
 #include "game_state.h"
 #include <chrono>
+#include <algorithm>
 
 GameState::GameState(const GameConfig& config) : config_(config) {
     players_.resize(config.num_players);
@@ -45,11 +46,14 @@ void GameState::advance_dealer() {
     dealer_seat_ = next_active_seat(dealer_seat_);
     hands_at_current_blind_++;
 
-    // blinds double after each full revolution
-    // a revolution = one hand per remaining player at the start of this blind level
+    // blinds increase after each full revolution
     if (hands_at_current_blind_ >= players_remaining()) {
-        small_blind_ *= 2;
+        int min_stack = min_active_stack();
+        int new_sb = std::max(small_blind_,
+                              std::min(2 * small_blind_, (min_stack + 2) / 3));
+        small_blind_ = new_sb;
         hands_at_current_blind_ = 0;
+        revolutions_++;
     }
 }
 
@@ -63,14 +67,33 @@ void GameState::check_eliminations() {
 }
 
 bool GameState::is_game_over() const {
-    return players_remaining() <= 1;
+    return players_remaining() <= 1 || revolutions_ >= MAX_REVOLUTIONS;
 }
 
 int GameState::winner_seat() const {
+    auto w = winners();
+    if (w.size() == 1) return w[0];
+    return -1; // tie
+}
+
+bool GameState::is_tie() const {
+    return winners().size() > 1;
+}
+
+std::vector<int> GameState::winners() const {
+    int max_chips = 0;
     for (const auto& p : players_) {
-        if (!p.eliminated) return p.seat;
+        if (!p.eliminated && p.chips > max_chips) {
+            max_chips = p.chips;
+        }
     }
-    return -1;
+    std::vector<int> result;
+    for (const auto& p : players_) {
+        if (!p.eliminated && p.chips == max_chips) {
+            result.push_back(p.seat);
+        }
+    }
+    return result;
 }
 
 int GameState::players_remaining() const {
@@ -79,4 +102,14 @@ int GameState::players_remaining() const {
         if (!p.eliminated) count++;
     }
     return count;
+}
+
+int GameState::min_active_stack() const {
+    int min_stack = INT32_MAX;
+    for (const auto& p : players_) {
+        if (!p.eliminated && p.chips < min_stack) {
+            min_stack = p.chips;
+        }
+    }
+    return min_stack == INT32_MAX ? 0 : min_stack;
 }

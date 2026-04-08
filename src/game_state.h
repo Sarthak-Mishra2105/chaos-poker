@@ -31,7 +31,10 @@ public:
     void advance_dealer();
     void check_eliminations();
     bool is_game_over() const;
-    int winner_seat() const;
+    int winner_seat() const;       // -1 if tie
+    bool is_tie() const;           // true if top stacks are equal
+    std::vector<int> winners() const; // all seats with max chips (for ties)
+    int revolutions() const { return revolutions_; }
 
     // accessors
     int num_players() const { return config_.num_players; }
@@ -49,6 +52,9 @@ public:
     // count non-eliminated players
     int players_remaining() const;
 
+    // smallest chip stack among non-eliminated players
+    int min_active_stack() const;
+
 private:
     GameConfig config_;
     std::vector<Player> players_;
@@ -57,6 +63,8 @@ private:
     int hand_number_ = 0;
     int hands_at_current_blind_ = 0;
     int initial_player_count_ = 0;
+    int revolutions_ = 0;
+    static constexpr int MAX_REVOLUTIONS = 200;
     GameHistory history_;
     std::mt19937 rng_;
 };
