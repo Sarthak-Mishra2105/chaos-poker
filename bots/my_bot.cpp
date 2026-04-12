@@ -220,25 +220,159 @@ HandScore evaluate_hand(const std::vector<Card>& cards) {
     return best;
 }
 
+std::vector<Card> full_deck() {
+    std::vector<Card> d;
+    d.reserve(52);
+    for (int s = 0; s < 4; s++) {
+        for (int r = 2; r <= 14; r++) {
+            d.push_back({static_cast<Rank>(r), static_cast<Suit>(s)});
+        }
+    }
+    return d;
+}
+
+bool card_in(const Card& c, const std::vector<Card>& v) {
+    for (const Card& x : v) {
+        if (c == x) return true;
+    }
+    return false;
+}
+
+std::vector<Card> build_unseen(const std::array<Card, 2>& hole,
+    const std::vector<Card>& community,
+    const std::vector<Card>& discarded) {
+    std::vector<Card> unseen;
+    for (const Card& c : full_deck()) {
+        if (c == hole[0] || c == hole[1]) continue;
+        if (card_in(c, community)) continue;
+        if (card_in(c, discarded)) continue;
+        unseen.push_back(c);
+    }
+    return unseen;
+}
+
+static std::mt19937 rng(
+    std::chrono::steady_clock::now().time_since_epoch().count());
+
+float estimate_equity(const std::array<Card, 2>& hole,
+    const std::vector<Card>& community,
+    const std::vector<Card>& discarded,
+    int num_opponents,
+    int max_sims = 3000,
+    int time_budget_us = 5500) {
+    
+    if (num_opponents <= 0 ) return 1.0f;
+
+    auto unseen = build_unseen(hole, community, discarded);
+    int n = (int)unseen.size();
+    int cards_needed = (5 - (int)community.size()) + 2 * num_opponents;
+    if (n < cards_needed) return 1.0f;
+
+    auto start = std::chrono::steady_clock::now();
+    float score_sum = 0.0f;
+    int sims = 0;
+
+    for (sims = 0; sims < max_sims; sims++) {
+        // Check time budget every 64 simulations, with bitwise operations
+        if (sims > 0 && (sims & 63) == 0) {
+            auto elapsed = std::chrono::duration_cast<
+            std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start
+            ).count();
+            if (elapsed >= time_budget_us) break;
+        }
+        
+        // Partial Fisher-Yates shuffle to get random cards
+        for (int i = 0; i < cards_needed; i++) {
+            int j = i + (rng() % (n - i));
+            std::swap(unseen[i], unseen[j]);
+        }
+
+        int idx = 0;
+        // Complete community
+        std::vector<Card> sim_comm = community;
+        while ((int)sim_comm.size() < 5)
+            sim_comm.push_back(unseen[idx++]);
+            
+        // check own hand
+        std::vector<Card> my_cards(sim_comm.begin(), sim_comm.end());
+        my_cards.push_back(hole[0]);
+        my_cards.push_back(hole[1]);
+        HandScore mine = evaluate_hand(my_cards);
+
+        // check opponents, count ties
+        bool i_win = true;
+        int tie_count = 0;
+        for (int o = 0; o < num_opponents; o++) {
+            std::vector<Card> opp(sim_comm.begin(), sim_comm.end());
+            opp.push_back(unseen[idx++]);
+            opp.push_back(unseen[idx++]);
+            HandScore s = evaluate_hand(opp);
+            if (s > mine) {
+                i_win = false;
+                break;
+            }
+            if (s == mine) tie_count++;
+        }
+        if (i_win) {
+            // 1.0 for win, 1/(tie_count+1) for tie
+            score_sum += 1.0f / (tie_count + 1);
+        }
+    }
+    if (sims == 0) return 0.5f;
+    std::cout << "Ran " << sims << " simulations in " 
+         << std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start
+            ).count() << " ms" << std::endl;
+    return score_sum / sims;
+}
+
 int main() {
     std::vector<std::string> test_hands = {
-        "As Ks Qs Js Ts",
-        "7h 7d 7s 7c Kd",
-        "Ad 2h 3c 4s 5d"
+        "As Ks Qs Js Ts",       // Royal Flush
+        "7h 7d 7s 7c Kd",       // Four of a Kind
+        "Ah Ad As Kh Kd",       // Full House
+        "2s 4s 6s 8s Ts",       // Flush
+        "Ad 2h 3c 4s 5d",       // Straight (Wheel)
+        "9h 9c 9d 2s 3c",       // Three of a Kind
+        "Jh Jc Th Tc 2s",       // Two Pair
+        "8h 8c Ad Ks Qc",       // One Pair
+        "Ah Jc 9d 5s 3h",       // High Card
+        "As Ks Qs Js Ts 9s 8s"  // 7 cards, should pick best 5 (Royal Flush)
     };
-    for (const std::string& hand_str : test_hands) {
-        std::istringstream iss(hand_str);
-        std::vector<Card> cards;
-        std::string card_str;
-        while (iss >> card_str) {
-            cards.push_back(parse_card(card_str));
-        }
-        HandScore score = evaluate_hand(cards);
-        std::cout << "Hand: " << hand_str << " -> Rank: " << static_cast<int>(score.rank) << " Kickers: ";
-        for (int k : score.kickers) {
-            if (k > 0) std::cout << k << " ";
-        }
-        std::cout << std::endl;
-    }
+    // for (const std::string& hand_str : test_hands) {
+    //     std::istringstream iss(hand_str);
+    //     std::vector<Card> cards;
+    //     std::string card_str;
+    //     while (iss >> card_str) {
+    //         cards.push_back(parse_card(card_str));
+    //     }
+    //     HandScore score = evaluate_hand(cards);
+    //     std::cout << "Hand: " << hand_str << " -> Rank: " << static_cast<int>(score.rank) << " Kickers: ";
+    //     for (int k : score.kickers) {
+    //         if (k > 0) std::cout << k << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
+
+    // Example equity estimation 1: Trash hand post-flop
+    std::array<Card, 2> hole1 = {parse_card("2h"), parse_card("3s")};
+    std::vector<Card> comm1 = {parse_card("7h"), parse_card("5s"), parse_card("Qd")};
+    std::vector<Card> disc = {};
+    float eq1 = estimate_equity(hole1, comm1, disc, 2);
+    std::cout << "Equity (2h 3s on 7h 5s Qd vs 2): " << eq1 << std::endl;
+
+    // Example equity estimation 2: Pocket Aces pre-flop
+    std::array<Card, 2> hole2 = {parse_card("As"), parse_card("Ah")};
+    std::vector<Card> comm2 = {};
+    float eq2 = estimate_equity(hole2, comm2, disc, 1);
+    std::cout << "Equity (As Ah pre-flop vs 1): " << eq2 << std::endl;
+
+    // Example equity estimation 3: Flush draw on the flop
+    std::array<Card, 2> hole3 = {parse_card("Ks"), parse_card("Qs")};
+    std::vector<Card> comm3 = {parse_card("2s"), parse_card("9s"), parse_card("4d")};
+    float eq3 = estimate_equity(hole3, comm3, disc, 1);
+    std::cout << "Equity (Ks Qs on 2s 9s 4d vs 1): " << eq3 << std::endl;
+
     return 0;
 }
