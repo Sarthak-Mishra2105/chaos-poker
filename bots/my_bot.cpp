@@ -37,6 +37,86 @@ struct HandScore {
     }
 };
 
+struct OpponentStats {
+    int hands_seen = 0;
+    int vpip_count = 0;
+    int pfr_count = 0;
+    int fold_count = 0;
+    int action_count = 0;
+    int total_bets_raises = 0;
+    int total_calls_checks = 0;
+    bool eliminated = false;
+
+    float fold_rate() const {
+        return action_count > 0 ? (float)fold_count / action_count : 0.3f;
+    }
+    float vpip() const {
+        return hands_seen > 0 ? (float)vpip_count / hands_seen : 0.5f;
+    }
+    float aggression() const {
+        int d = total_calls_checks;
+        return d > 0 ? (float)total_bets_raises / d : 1.0f;
+    }
+};
+
+struct GameState {
+    int num_players = 0, my_seat = -1, starting_chips = 0;
+    int swap_mult[4] = {};
+    int hand_num = 0, dealer = 0;
+    int sb_seat = 0, bb_seat = 0, sb_amount = 0, bb_amount = 0;
+
+    std::vector<int> chips;
+    std::array<Card, 2> hole;
+    std::vector<Card> community;
+    std::vector<Card> discarded;
+    std::vector<OpponentStats> opp_stats;
+    int street = 0;
+    std::vector<bool> folded;
+    std::vector<bool> all_in_flag;
+    int pot_estimate = 0;
+    int swaps_this_phase = 0;
+
+    int non_folded_opponents() const {
+        int cnt = 0;
+        for (int i = 0; i < num_players; i++) {
+            if (i == my_seat) continue;
+            if (!folded[i] && !opp_stats[i].eliminated) cnt++;
+        }
+        return cnt;
+    }
+    float avg_opp_fold_rate() const {
+        float sum = 0; int cnt = 0;
+        for (int i = 0; i < num_players; i++) {
+            if (i == my_seat || folded[i] || opp_stats[i].eliminated) continue;
+            sum += opp_stats[i].fold_rate();
+            cnt++;
+        }
+        return cnt > 0 ? sum / cnt : 1.0f;
+    }
+    float avg_opp_aggression() const {
+        float sum = 0; int cnt = 0;
+        for (int i = 0; i < num_players; i++) {
+            if (i == my_seat || folded[i] || opp_stats[i].eliminated) continue;
+            sum += opp_stats[i].aggression();
+            cnt++;
+        }
+        return cnt > 0 ? sum / cnt : 1.0f;
+    }
+    bool is_late_position() const {
+        int rel = (my_seat - dealer + num_players) % num_players;
+        if (num_players <= 3) return rel == 0;
+        return rel == 0 || rel == num_players - 1;
+    }
+    bool is_chip_leader() const {
+        int my = chips.empty() ? 0 : chips[my_seat];
+        for (int i = 0; i < num_players; i++) {
+            if (i == my_seat || opp_stats[i].eliminated) continue;
+            if (chips[i] > my) return false;
+        }
+        return true;
+    }
+};
+
 Rank char_to_rank(char c) {
     switch(c) {
         case '2': return Rank::TWO;
@@ -328,51 +408,163 @@ float estimate_equity(const std::array<Card, 2>& hole,
 }
 
 int main() {
-    std::vector<std::string> test_hands = {
-        "As Ks Qs Js Ts",       // Royal Flush
-        "7h 7d 7s 7c Kd",       // Four of a Kind
-        "Ah Ad As Kh Kd",       // Full House
-        "2s 4s 6s 8s Ts",       // Flush
-        "Ad 2h 3c 4s 5d",       // Straight (Wheel)
-        "9h 9c 9d 2s 3c",       // Three of a Kind
-        "Jh Jc Th Tc 2s",       // Two Pair
-        "8h 8c Ad Ks Qc",       // One Pair
-        "Ah Jc 9d 5s 3h",       // High Card
-        "As Ks Qs Js Ts 9s 8s"  // 7 cards, should pick best 5 (Royal Flush)
-    };
-    // for (const std::string& hand_str : test_hands) {
-    //     std::istringstream iss(hand_str);
-    //     std::vector<Card> cards;
-    //     std::string card_str;
-    //     while (iss >> card_str) {
-    //         cards.push_back(parse_card(card_str));
-    //     }
-    //     HandScore score = evaluate_hand(cards);
-    //     std::cout << "Hand: " << hand_str << " -> Rank: " << static_cast<int>(score.rank) << " Kickers: ";
-    //     for (int k : score.kickers) {
-    //         if (k > 0) std::cout << k << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
+    GameState gs;
+    std::string line;
 
-    // Example equity estimation 1: Trash hand post-flop
-    std::array<Card, 2> hole1 = {parse_card("2h"), parse_card("3s")};
-    std::vector<Card> comm1 = {parse_card("7h"), parse_card("5s"), parse_card("Qd")};
-    std::vector<Card> disc = {};
-    float eq1 = estimate_equity(hole1, comm1, disc, 2);
-    std::cout << "Equity (2h 3s on 7h 5s Qd vs 2): " << eq1 << std::endl;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) continue;
+        
+        std::istringstream iss(line);
+        std::string cmd;
+        iss >> cmd;
 
-    // Example equity estimation 2: Pocket Aces pre-flop
-    std::array<Card, 2> hole2 = {parse_card("As"), parse_card("Ah")};
-    std::vector<Card> comm2 = {};
-    float eq2 = estimate_equity(hole2, comm2, disc, 1);
-    std::cout << "Equity (As Ah pre-flop vs 1): " << eq2 << std::endl;
+        if (cmd == "GAME_START") {
+            iss >> gs.num_players >> gs.my_seat >> gs.starting_chips
+            >> gs.swap_mult[0] >> gs.swap_mult[1] >> 
+            gs.swap_mult[2] >> gs.swap_mult[3];
+            gs.chips.assign(gs.num_players, gs.starting_chips);
+            gs.opp_stats.resize(gs.num_players);
+            gs.folded.assign(gs.num_players, false);
+            gs.all_in_flag.assign(gs.num_players, false);
+            gs.pot_estimate = 0;
+        }
 
-    // Example equity estimation 3: Flush draw on the flop
-    std::array<Card, 2> hole3 = {parse_card("Ks"), parse_card("Qs")};
-    std::vector<Card> comm3 = {parse_card("2s"), parse_card("9s"), parse_card("4d")};
-    float eq3 = estimate_equity(hole3, comm3, disc, 1);
-    std::cout << "Equity (Ks Qs on 2s 9s 4d vs 1): " << eq3 << std::endl;
+        else if (cmd == "HAND_START") {
+            iss >> gs.hand_num >> gs.dealer
+            >> gs.sb_seat >> gs.bb_seat
+            >> gs.sb_amount >> gs.bb_amount;
+            gs.community.clear();
+            gs.discarded.clear();
+            gs.street = 0;
+            gs.folded.assign(gs.num_players, false);
+            gs.all_in_flag.assign(gs.num_players, false);
+            gs.pot_estimate = gs.sb_amount + gs.bb_amount;
+            gs.swaps_this_phase = 0;
+        }
 
-    return 0;
+        else if (cmd == "CHIPS") {
+            for (int i = 0; i < gs.num_players; i++) {
+                iss >> gs.chips[i];
+            }
+        }
+
+        else if (cmd == "DEAL_HOLE") {
+            std::string c1, c2;
+            iss >> c1 >> c2;
+            gs.hole[0] == parse_card(c1);
+            gs.hole[1] == parse_card(c2);
+        }
+
+        else if (cmd == "DEAL_FLOP") {
+            gs.street = 1;
+            std::string c1, c2, c3;
+            iss >> c1 >> c2 >> c3;
+            gs.community.push_back(parse_card(c1));
+            gs.community.push_back(parse_card(c2));
+            gs.community.push_back(parse_card(c3));
+        }
+
+        else if (cmd == "DEAL_TURN") {
+            gs.street = 2;
+            std::string c;
+            iss >> c;
+            gs.community.push_back(parse_card(c));
+        }
+
+        else if (cmd == "DEAL_RIVER") {
+            gs.street = 3;
+            std::string c;
+            iss >> c;
+            gs.community.push_back(parse_card(c));
+        }
+
+        // handle redraws
+        else if (cmd == "REDRAW_FLOP") {
+            for (auto& c : gs.community) {
+                gs.discarded.push_back(c);
+            }
+            gs.community.clear();
+            std::string c1, c2, c3;
+            iss >> c1 >> c2 >> c3;
+            gs.community.push_back(parse_card(c1));
+            gs.community.push_back(parse_card(c2));
+            gs.community.push_back(parse_card(c3));
+        }
+
+        else if (cmd == "REDRAW_TURN") {
+            while (gs.community.size() > 3) {
+                gs.discarded.push_back(gs.community.back());
+                gs.community.pop_back();
+            }
+            std::string c;
+            iss >> c;
+            gs.community.push_back(parse_card(c));
+        }
+        
+        else if (cmd == "REDRAW_RIVER") {
+            while (gs.community.size() > 4) {
+                gs.discarded.push_back(gs.community.back());
+                gs.community.pop_back();
+            }
+            std::string c;
+            iss >> c;
+            gs.community.push_back(parse_card(c));
+        }
+        
+        // TODO: handle decisions
+
+        else if (cmd == "ACTION") {
+            int seat;
+            std::string action;
+            iss >> seat >> action;
+            if (action == "FOLD") {
+                gs.folded[seat] = true;
+                if (seat != gs.my_seat) {
+                    gs.opp_stats[seat].fold_count++;
+                    gs.opp_stats[seat].action_count++;
+                }
+            }
+            else if (action == "CHECK") {
+                if (seat != gs.my_seat) {
+                    gs.opp_stats[seat].total_calls_checks++;
+                    gs.opp_stats[seat].action_count++;
+                }
+            }
+            else if (action == "CALL") {
+                int amt = 0;
+                iss >> amt;
+                gs.pot_estimate += amt;
+                if (seat != gs.my_seat) {
+                    gs.opp_stats[seat].total_calls_checks++;
+                    gs.opp_stats[seat].action_count++;
+                    if (gs.street == 0) gs.opp_stats[seat].vpip_count++;
+                }
+            }
+            else if (action == "RAISE" || action == "ALLIN") {
+                int amt = 0;
+                iss >> amt;
+                if (action == "ALLIN") gs.all_in_flag[seat] = true;
+                gs.pot_estimate += amt;
+                if (seat != gs.my_seat) {
+                    gs.opp_stats[seat].total_bets_raises++;
+                    gs.opp_stats[seat].action_count++;
+                    if (gs.street == 0) {
+                        gs.opp_stats[seat].vpip_count++;
+                        gs.opp_stats[seat].pfr_count++;
+                    }
+                }
+            }
+        }
+
+        else if (cmd == "ELIMINATE") {
+            int seat;
+            iss >> seat;
+            gs.opp_stats[seat].eliminated = true;
+        }
+        else if (cmd == "GAME_OVER") {
+            break;
+        }
+
+        // ignore other messages like SHOWDOWN, WINNER, etc. for now
+    }
 }
