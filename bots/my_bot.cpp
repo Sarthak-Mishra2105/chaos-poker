@@ -300,14 +300,17 @@ HandScore evaluate_hand(const std::vector<Card>& cards) {
     return best;
 }
 
-std::vector<Card> full_deck() {
-    std::vector<Card> d;
-    d.reserve(52);
-    for (int s = 0; s < 4; s++) {
-        for (int r = 2; r <= 14; r++) {
-            d.push_back({static_cast<Rank>(r), static_cast<Suit>(s)});
+const std::vector<Card>& full_deck() {
+    static std::vector<Card> d = []() {
+        std::vector<Card> v;
+        v.reserve(52);
+        for (int s = 0; s < 4; s++) {
+            for (int r = 2; r <= 14; r++) {
+                v.push_back({static_cast<Rank>(r), static_cast<Suit>(s)});
+            }
         }
-    }
+        return v;
+    }();
     return d;
 }
 
@@ -540,9 +543,9 @@ std::string decide_vote(GameState& gs, int my_chips) {
     float eq_redraw = estimate_equity(gs.hole, base_comm, disc_if_redrawn,
         num_opp, 400, 1500);
     float delta = eq_keep - eq_redraw;
-    int pot_est = std::max(gs.pot_estimate, 2 * gs.bb_amount);
-    float swing = std::abs(delta) * pot_est * 0.25;
-    int wager = (std::abs(delta) > 0.05f) ? std::min((int)swing, my_chips / 30) : 0;
+    int pot_est = std::max((int)(gs.pot_estimate * 2.0f), gs.bb_amount * 6);
+    float swing = std::abs(delta) * pot_est * 0.6f;
+    int wager = (std::abs(delta) > 0.04f) ? std::min((int)swing, my_chips / 8) : 0;
 
     if (delta >= 0) return "VOTE YES " + std::to_string(wager);
     else return "VOTE NO " + std::to_string(wager);
@@ -557,10 +560,11 @@ std::string decide_action(GameState& gs, int chips, int current_bet,
     float equity = estimate_equity(gs.hole, gs.community, gs.discarded, 
         gs.non_folded_opponents(), 1500, 5500);
 
-    float range_disc = (gs.street == 1) ? 0.02f 
-    : (gs.street == 2) ? 0.03f 
-    : (gs.street == 3) ? 0.04f : 0.0f;
-    equity -= range_disc;
+    int num_opp = gs.non_folded_opponents();
+    float per_opp_disc = (gs.street == 1) ? 0.01f 
+    : (gs.street == 2) ? 0.015f 
+    : (gs.street == 3) ? 0.02f : 0.0f;
+    equity -= per_opp_disc * num_opp;
     
     // adjust equity based on opponent tendencies
     float opp_fold = gs.avg_opp_fold_rate();
@@ -623,10 +627,12 @@ std::string decide_action(GameState& gs, int chips, int current_bet,
             return "RAISE " + std::to_string(safe_raise(sz));
         }
         // semibluff with fold equity
-        if (equity > 0.35f && opp_fold > 0.4f && late_pos) {
-            float bluff_ev = opp_fold * pot + (1-opp_fold)*(equity*(pot+pot*0.4f)-pot*0.4f);
+        if (equity > 0.30f && opp_fold > 0.35f && late_pos) {
+            float all_fold = std::pow(opp_fold, num_opp);
+            float bet_frac = 0.35f;
+            float bluff_ev = all_fold * pot + (1-all_fold)*(equity*(pot+pot*bet_frac)-pot*bet_frac);
             if (bluff_ev > equity * pot) {
-                return "RAISE " + std::to_string(safe_raise(0.35f));
+                return "RAISE " + std::to_string(safe_raise(bet_frac));
             }
         }
         return "CHECK";
@@ -682,6 +688,10 @@ int main() {
             gs.all_in_flag.assign(gs.num_players, false);
             gs.pot_estimate = gs.sb_amount + gs.bb_amount;
             gs.swaps_this_phase = 0;
+            for (int i = 0; i < gs.num_players; i++) {
+                if (i != gs.my_seat && !gs.opp_stats[i].eliminated)
+                    gs.opp_stats[i].hands_seen++;
+            }
         }
 
         else if (cmd == "CHIPS") {
