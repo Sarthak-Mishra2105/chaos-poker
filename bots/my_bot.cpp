@@ -55,7 +55,8 @@ struct OpponentStats {
     }
     float aggression() const {
         int d = total_calls_checks;
-        return d > 0 ? (float)total_bets_raises / d : 1.0f;
+        if (d > 0) return (float)total_bets_raises / d;
+        return total_bets_raises > 3 ? 10.0f : 1.0f;
     }
 };
 
@@ -545,7 +546,10 @@ std::string decide_vote(GameState& gs, int my_chips) {
     float delta = eq_keep - eq_redraw;
     int pot_est = std::max((int)(gs.pot_estimate * 2.0f), gs.bb_amount * 6);
     float swing = std::abs(delta) * pot_est * 0.6f;
-    int wager = (std::abs(delta) > 0.04f) ? std::min((int)swing, my_chips / 8) : 0;
+    // scale max wager by conviction: strong delta gets up to chips/4
+    int max_wager = (std::abs(delta) > 0.15f) ? my_chips / 4
+        : (std::abs(delta) > 0.08f) ? my_chips / 6 : my_chips / 8;
+    int wager = (std::abs(delta) > 0.04f) ? std::min((int)swing, max_wager) : 0;
 
     if (delta >= 0) return "VOTE YES " + std::to_string(wager);
     else return "VOTE NO " + std::to_string(wager);
@@ -561,18 +565,19 @@ std::string decide_action(GameState& gs, int chips, int current_bet,
         gs.non_folded_opponents(), 1500, 5500);
 
     int num_opp = gs.non_folded_opponents();
+    float opp_fold = gs.avg_opp_fold_rate();
+    float opp_agg = gs.avg_opp_aggression();
+
+    // range discount: reduce when opponents are hyper-aggressive (wide range)
+    float agg_factor = (opp_agg > 2.5f) ? std::max(0.0f, 1.0f - (opp_agg - 2.5f) * 0.2f) : 1.0f;
     float per_opp_disc = (gs.street == 1) ? 0.01f 
     : (gs.street == 2) ? 0.015f 
     : (gs.street == 3) ? 0.02f : 0.0f;
-    equity -= per_opp_disc * num_opp;
-    
-    // adjust equity based on opponent tendencies
-    float opp_fold = gs.avg_opp_fold_rate();
-    float opp_agg = gs.avg_opp_aggression();
+    equity -= per_opp_disc * num_opp * agg_factor;
     bool late_pos = gs.is_late_position();
 
-    // risk factors when chip leader
-    float risk_adjust = gs.is_chip_leader() ? 0.03f : 0.0f;
+    // risk factors when chip leader (reduced vs hyper-aggressive opponents)
+    float risk_adjust = gs.is_chip_leader() ? 0.03f * agg_factor : 0.0f;
 
     float pot_odds = (pot + to_call > 0) ? (float)to_call / (pot + to_call) : 0.0f;
     float spr = (pot > 0) ? (float)chips / pot : 20.0f;
