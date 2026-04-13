@@ -77,7 +77,11 @@ std::string HandRecord::serialize() const {
         }
 
         if (e.type == EventType::WINNER) {
-            oss << " " << hand_rank_to_string(e.hand_rank);
+            if (!e.action.empty()) {
+                oss << " " << e.action;
+            } else {
+                oss << " " << hand_rank_to_string(e.hand_rank);
+            }
         }
 
         oss << "\n";
@@ -186,9 +190,8 @@ std::string GameHistory::pretty_print() const {
             case EventType::WINNER:
                 out << "  >> P" << e.player << " wins "
                     << e.amount << " chips";
-                if (e.hand_rank != HandRank::HIGH_CARD || e.amount > 0) {
-                    out << " (" << hand_rank_to_string(e.hand_rank) << ")";
-                }
+                if (!e.action.empty()) out << " (" << e.action << ")";
+                else out << " (" << hand_rank_to_string(e.hand_rank) << ")";
                 out << "\n";
                 break;
 

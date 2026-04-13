@@ -48,6 +48,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "Need at least 2 bot commands\n";
         return 1;
     }
+    if (num_players > DECK_SIZE / 2) {
+        std::cerr << "A single hand supports at most " << (DECK_SIZE / 2)
+                  << " players with a 52-card deck\n";
+        return 1;
+    }
 
     GameConfig config;
     config.num_players = num_players;

@@ -164,4 +164,7 @@ Any official clarifications to the rules will be summarised in this README so yo
 
 ## Clarifications
 
-- Response timeout: the official time limit is now 10 ms per decision, and the provided test harness has been updated accordingly.
+- 2026-04-10 13:41 IST: The official response timeout is now 10 ms per decision, and the provided test harness has been updated accordingly.
+- 2026-04-12 08:00 IST: We have made fixes to the test harness, and may continue to do so as issues are identified. We may not add a clarification entry for every future test harness fix. Where test harness behaviour deviates from [RULES.md](RULES.md), the rules in [RULES.md](RULES.md) take precedence.
+- 2026-04-12 08:43 IST: Deck exhaustion in the test harness is now handled without crashing. Discarded cards are not reused; unavailable swaps and redraws are skipped, a swap round may be skipped if there are not enough cards to fulfil every eligible swap while preserving a valid showdown path, and if a later street cannot be dealt the hand proceeds directly to showdown using the cards already in play.
+- 2026-04-12 08:52 IST: The test harness now also rejects impossible match sizes above 26 players, marks players all-in when they spend their last chip during swap or vote phases, and correctly applies the all-error split rule in vote phases.

@@ -18,7 +18,7 @@ The game is played over multiple hands. Players are eliminated when they run out
 ## 2. Setup
 
 ### 2.1 Players
-- Minimum 2 players, no fixed upper limit.
+- Minimum 2 players, maximum 26 players.
 - Each player is assigned a seat number `0` through `N-1`.
 
 ### 2.2 Chips
@@ -41,6 +41,7 @@ The game is played over multiple hands. Players are eliminated when they run out
 
 ### 2.5 Deck
 - Standard 52-card deck, reshuffled each hand.
+- Cards discarded during a hand are not reused within that hand.
 
 ---
 
@@ -109,6 +110,7 @@ The swap phase consists of multiple **swap rounds**:
    - If at least one player swapped, another swap round begins with only those players who swapped in the previous round.
    - If no player swapped (all chose `STAY`), the swap phase ends.
 6. A player cannot swap if they do not have enough chips to pay the cost.
+7. A swap round is only started if there are enough cards remaining to complete one swap for every eligible player in that round while still preserving the minimum cards needed to complete the hand. If not, the swap phase ends immediately with `SWAP_DONE`.
 
 ---
 
@@ -123,6 +125,7 @@ After the swap phase, active (non-folded) players vote on whether to keep the cu
 - The engine sums up the total chips wagered on YES and the total on NO.
   - If YES total >= NO total (ties go to YES): the community cards **stay**.
   - If NO total > YES total: the community cards for this street are **discarded and redrawn** from the remaining deck.
+- If a redraw would require more cards than remain in the deck, the current community cards stay.
 - After the vote resolves, all players are told:
   - The total money on YES and the total money on NO.
   - Whether the cards were kept or redrawn.
@@ -137,6 +140,8 @@ After the final betting round:
 
 - All remaining (non-folded) players reveal their hole cards.
 - The best 5-card hand from each player's 2 hole cards + 5 community cards wins.
+- If a later street cannot be dealt because there are not enough cards remaining in the deck, the hand proceeds directly to showdown using the cards already in play.
+- If fewer than 5 total cards are available for evaluation, all remaining players tie for the relevant pot(s).
 - Standard poker hand rankings apply (Royal Flush > Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card).
 - In case of a tie, the pot is split equally among tied players (remainder chips go to the player closest to the left of the dealer).
 - Side pots are resolved in standard fashion when players are all-in for different amounts.
@@ -328,9 +333,12 @@ One line per player still in the hand.
 #### `WINNER`
 Sent when a pot (or side pot) is awarded.
 ```
-WINNER <seat> <amount> <hand_rank>
+WINNER <seat> <amount> <result>
 ```
-- `hand_rank`: one of `ROYAL_FLUSH`, `STRAIGHT_FLUSH`, `FOUR_OF_A_KIND`, `FULL_HOUSE`, `FLUSH`, `STRAIGHT`, `THREE_OF_A_KIND`, `TWO_PAIR`, `ONE_PAIR`, `HIGH_CARD`
+- `result`: one of:
+  - a showdown hand rank: `ROYAL_FLUSH`, `STRAIGHT_FLUSH`, `FOUR_OF_A_KIND`, `FULL_HOUSE`, `FLUSH`, `STRAIGHT`, `THREE_OF_A_KIND`, `TWO_PAIR`, `ONE_PAIR`, `HIGH_CARD`
+  - `FOLD_WIN` if all other players folded before showdown
+  - `ERROR_SPLIT` if the pot is split because every remaining player was auto-folded for IO errors in the most recent phase
 
 Example:
 ```

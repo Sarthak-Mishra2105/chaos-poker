@@ -27,7 +27,7 @@ public:
 
 private:
     void deal_hole_cards();
-    void deal_community(Street street);
+    bool deal_community(Street street);
 
     void swap_phase(Street street);
     void vote_phase(Street street);
@@ -60,6 +60,9 @@ private:
     std::vector<int> round_bets_;
     // total chips put into pot by each player this hand
     std::vector<int> total_invested_;
+    // actual blind posts for the current hand, tracked separately from swap costs
+    int small_blind_post_ = 0;
+    int big_blind_post_ = 0;
 
     int current_bet_ = 0;
     int last_raise_size_ = 0;

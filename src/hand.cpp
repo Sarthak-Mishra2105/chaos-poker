@@ -70,28 +70,40 @@ bool Hand::run() {
 
     // flop
     current_street_ = Street::FLOP;
-    deal_community(Street::FLOP);
+    if (!deal_community(Street::FLOP)) {
+        showdown();
+        return true;
+    }
     swap_phase(Street::FLOP);
     if (check_single_winner()) return true;
     vote_phase(Street::FLOP);
+    if (check_single_winner()) return true;
     betting_round(Street::FLOP);
     if (check_single_winner()) return true;
 
     // turn
     current_street_ = Street::TURN;
-    deal_community(Street::TURN);
+    if (!deal_community(Street::TURN)) {
+        showdown();
+        return true;
+    }
     swap_phase(Street::TURN);
     if (check_single_winner()) return true;
     vote_phase(Street::TURN);
+    if (check_single_winner()) return true;
     betting_round(Street::TURN);
     if (check_single_winner()) return true;
 
     // river
     current_street_ = Street::RIVER;
-    deal_community(Street::RIVER);
+    if (!deal_community(Street::RIVER)) {
+        showdown();
+        return true;
+    }
     swap_phase(Street::RIVER);
     if (check_single_winner()) return true;
     vote_phase(Street::RIVER);
+    if (check_single_winner()) return true;
     betting_round(Street::RIVER);
     if (check_single_winner()) return true;
 
@@ -117,9 +129,12 @@ void Hand::deal_hole_cards() {
     }
 }
 
-void Hand::deal_community(Street street) {
+bool Hand::deal_community(Street street) {
     auto& record = state_.history().current_hand();
     int num_cards = (street == Street::FLOP) ? 3 : 1;
+    if (deck_.cards_remaining() < num_cards) {
+        return false;
+    }
     auto drawn = deck_.draw(num_cards);
 
     for (auto& c : drawn) {
@@ -141,6 +156,7 @@ void Hand::deal_community(Street street) {
         oss << " " << card_to_string(c);
     }
     io_.broadcast(oss.str());
+    return true;
 }
 
 bool Hand::post_blinds() {
@@ -153,6 +169,7 @@ bool Hand::post_blinds() {
     // small blind
     int sb_post = std::min(sb, players[sb_seat].chips);
     players[sb_seat].chips -= sb_post;
+    small_blind_post_ = sb_post;
     round_bets_[sb_seat] = sb_post;
     total_invested_[sb_seat] += sb_post;
     pot_ += sb_post;
@@ -161,6 +178,7 @@ bool Hand::post_blinds() {
     // big blind
     int bb_post = std::min(bb, players[bb_seat].chips);
     players[bb_seat].chips -= bb_post;
+    big_blind_post_ = bb_post;
     round_bets_[bb_seat] = bb_post;
     total_invested_[bb_seat] += bb_post;
     pot_ += bb_post;
@@ -177,6 +195,9 @@ void Hand::swap_phase(Street street) {
     auto& record = state_.history().current_hand();
     int cost = state_.swap_cost(street);
     phase_force_folds_.clear();
+    int reserve_cards = (street == Street::PREFLOP && community_cards_.size() < 3)
+        ? (3 - static_cast<int>(community_cards_.size()))
+        : 0;
 
     // track which players are still eligible for swapping
     std::vector<bool> eligible(state_.num_players(), false);
@@ -189,14 +210,21 @@ void Hand::swap_phase(Street street) {
     while (true) {
         // check if anyone is eligible
         bool any_eligible = false;
+        int eligible_count = 0;
         for (int i = 0; i < state_.num_players(); i++) {
-            if (eligible[i]) { any_eligible = true; break; }
+            if (eligible[i]) {
+                any_eligible = true;
+                eligible_count++;
+            }
         }
         if (!any_eligible) break;
+        if (deck_.cards_remaining() - reserve_cards < eligible_count) break;
 
         // send SWAP_PROMPT to all eligible players
+        std::vector<int> prompted_seats;
         for (int i = 0; i < state_.num_players(); i++) {
             if (!eligible[i]) continue;
+            prompted_seats.push_back(i);
             std::ostringstream oss;
             oss << "SWAP_PROMPT " << cost << " " << players[i].chips;
             io_.send(i, oss.str());
@@ -204,17 +232,11 @@ void Hand::swap_phase(Street street) {
 
         // collect responses
         bool anyone_swapped = false;
-        for (int i = 0; i < state_.num_players(); i++) {
-            if (!eligible[i]) continue;
-
-            // if this is the last active player, don't risk folding them
-            if (count_active() <= 1) break;
-
+        for (int i : prompted_seats) {
             std::string response = io_.recv(i);
             if (response.empty()) {
                 force_fold(i);
                 eligible[i] = false;
-                if (count_active() <= 1) break;
                 continue;
             }
 
@@ -230,7 +252,6 @@ void Hand::swap_phase(Street street) {
                 if (!(iss >> idx) || (idx != 0 && idx != 1)) {
                     force_fold(i);
                     eligible[i] = false;
-                    if (count_active() <= 1) break;
                     continue;
                 }
 
@@ -238,6 +259,7 @@ void Hand::swap_phase(Street street) {
                 players[i].chips -= cost;
                 pot_ += cost;
                 total_invested_[i] += cost;
+                if (players[i].chips == 0) players[i].all_in = true;
 
                 // discard old card (don't return to deck), draw new one
                 Card old_card = players[i].hole_cards[idx];
@@ -258,7 +280,6 @@ void Hand::swap_phase(Street street) {
             } else {
                 force_fold(i);
                 eligible[i] = false;
-                if (count_active() <= 1) break;
             }
         }
 
@@ -279,8 +300,10 @@ void Hand::vote_phase(Street street) {
     int yes_total = 0, no_total = 0;
 
     // send VOTE_PROMPT to all active players
+    std::vector<int> prompted_seats;
     for (auto& p : players) {
         if (!p.is_active()) continue;
+        prompted_seats.push_back(p.seat);
 
         std::ostringstream oss;
         oss << "VOTE_PROMPT " << p.chips;
@@ -288,14 +311,12 @@ void Hand::vote_phase(Street street) {
     }
 
     // collect votes
-    for (auto& p : players) {
-        if (!p.is_active()) continue;
-        if (count_active() <= 1) break;
+    for (int seat : prompted_seats) {
+        auto& p = players[seat];
 
         std::string response = io_.recv(p.seat);
         if (response.empty()) {
             force_fold(p.seat);
-            if (count_active() <= 1) break;
             continue;
         }
 
@@ -306,19 +327,18 @@ void Hand::vote_phase(Street street) {
 
         if (cmd != "VOTE" || (direction != "YES" && direction != "NO")) {
             force_fold(p.seat);
-            if (count_active() <= 1) break;
             continue;
         }
 
         if (amount < 0 || amount > p.chips) {
             force_fold(p.seat);
-            if (count_active() <= 1) break;
             continue;
         }
 
         p.chips -= amount;
         pot_ += amount;
         total_invested_[p.seat] += amount;
+        if (p.chips == 0) p.all_in = true;
 
         if (direction == "YES") {
             yes_total += amount;
@@ -332,6 +352,10 @@ void Hand::vote_phase(Street street) {
     }
 
     bool kept = (yes_total >= no_total);
+    int redraw_cards_needed = (street == Street::FLOP) ? 3 : 1;
+    if (!kept && deck_.cards_remaining() < redraw_cards_needed) {
+        kept = true;
+    }
 
     // log vote result
     auto& vr = record.add_event_ref(EventType::VOTE_RESULT, -1, street);
@@ -348,18 +372,15 @@ void Hand::vote_phase(Street street) {
 
     // if vote says redraw, replace community cards for this street
     if (!kept) {
-        int num_cards;
         if (street == Street::FLOP) {
             // remove last 3 community cards, redraw 3
-            num_cards = 3;
             for (int i = 0; i < 3; i++) community_cards_.pop_back();
         } else {
             // remove last 1, redraw 1
-            num_cards = 1;
             community_cards_.pop_back();
         }
 
-        auto drawn = deck_.draw(num_cards);
+        auto drawn = deck_.draw(redraw_cards_needed);
         for (auto& c : drawn) {
             community_cards_.push_back(c);
         }
@@ -393,12 +414,12 @@ void Hand::betting_round(Street street) {
     last_raise_size_ = state_.big_blind();
 
     if (street == Street::PREFLOP) {
-        // Blinds were already posted in post_blinds(). Reflect them as this round's bets.
+        // Pre-flop round bets should only reflect the blinds, not swap costs.
         int sb_s = state_.small_blind_seat();
         int bb_s = state_.big_blind_seat();
-        round_bets_[sb_s] = total_invested_[sb_s];
-        round_bets_[bb_s] = total_invested_[bb_s];
-        current_bet_ = round_bets_[bb_s];
+        round_bets_[sb_s] = small_blind_post_;
+        round_bets_[bb_s] = big_blind_post_;
+        current_bet_ = big_blind_post_;
         last_raise_size_ = state_.big_blind();
     }
 
@@ -719,6 +740,7 @@ bool Hand::check_single_winner() {
                         auto& record = state_.history().current_hand();
                         auto& ev = record.add_event_ref(EventType::WINNER, p.seat, current_street_);
                         ev.amount = pot_;
+                        ev.action = "FOLD_WIN";
                         io_.broadcast("WINNER " + std::to_string(p.seat) + " " +
                                       std::to_string(pot_) + " FOLD_WIN");
                         break;
@@ -748,6 +770,7 @@ bool Hand::check_single_winner() {
                     auto& record = state_.history().current_hand();
                     auto& ev = record.add_event_ref(EventType::WINNER, seat, current_street_);
                     ev.amount = award;
+                    ev.action = "ERROR_SPLIT";
                     io_.broadcast("WINNER " + std::to_string(seat) + " " +
                                   std::to_string(award) + " ERROR_SPLIT");
                 }
