@@ -1,12 +1,109 @@
-# Chaos Poker Take-Home
+# Chaos Poker Bot — Submission
 
-Build a bot that plays Chaos Poker.
+**Name:** Sarthak Mishra
 
-## Task
+---
 
-Implement a bot that communicates with the engine over `stdin` / `stdout` using the protocol in [RULES.md](RULES.md).
+## Building
 
-The code in this repository is provided as a **test harness** for local development.
+Requires a C++17 compiler (e.g. `g++`). Build the engine and all bots with:
+
+```bash
+make
+```
+
+---
+
+## Launch Command
+
+The bot communicates over `stdin`/`stdout`. Exact launch command:
+
+```bash
+./bots/my_bot
+```
+
+---
+
+## Running a Match
+
+```bash
+./chaos_poker --history 1000 5 15 25 50 ./bots/my_bot ./bots/example_bot ./bots/random_bot
+```
+
+Adjust the number of bots (2–6 players supported) and the `--history` flag (hand-history line count) as needed.
+
+---
+
+## Strategy
+
+The bot uses **Monte Carlo equity estimation** as its core decision engine, layered with opponent-adaptive logic and stack-depth tiers.
+
+### Equity Estimation
+
+For every action and vote decision the bot runs a time-budgeted Monte Carlo simulation (up to 1 500 random boards, capped at ~5.5 ms) to estimate win probability at showdown. Each trial completes the community cards and randomly assigns hole cards to all remaining opponents.
+
+### Opponent Modelling
+
+The bot tracks per-seat statistics across hands:
+
+| Stat | Default |
+|------|---------|
+| Fold rate | 0.30 |
+| VPIP | 0.50 |
+| Aggression factor | 1.0 |
+
+These drive two key adjustments:
+
+- **Range discounting**: opponents who reach later streets have stronger-than-random ranges, so raw MC equity is reduced by a per-opponent multiplier (0.01 / 0.015 / 0.02 on flop / turn / river). Against hyper-aggressive opponents (`aggression > 2.5`) the discount is scaled down via `agg_factor = max(0, 1 − (agg − 2.5) × 0.2)`, since their wide ranges partially offset the selection effect.
+- **Implied-odds calls**: when facing a bet with `SPR > 6` and `equity > 0.25`, the bot will call even slightly below pot odds (`equity > pot_odds − 0.08`) to account for the extra value of catching a strong hand on later streets.
+
+### Action Tiers (Stack-Depth Aware)
+
+| Stack | Strategy |
+|-------|----------|
+| < 10 BB | Push/fold: commit with equity > 0.45 open, equity > 0.38 facing a bet |
+| 10–30 BB | Raise (0.55× pot) with equity > 0.68; positional raise (0.35× pot) with equity > 0.50 in position; call with equity > pot\_odds + 0.02 |
+| > 30 BB | Full value-bet / semi-bluff / pot-control logic |
+
+In the deep-stack path:
+
+- **Strong value bet** (equity > 0.72): raises 0.70× pot against aggressive opponents (`opp_agg > 1.5`), 0.55× pot otherwise.
+- **Medium value bet** (equity > 0.55, SPR > 3): raises 0.40× pot in position, 0.35× pot out of position.
+- **Semi-bluffs** in position: when equity > 0.30, avg fold rate > 0.35, and a calculated EV comparison (`bluff_ev > check_ev`) passes, the bot bets 0.35× pot to steal.
+- **Risk adjustment**: the bot slightly tightens committing thresholds when it is the chip leader, scaled by `agg_factor` (so the adjustment shrinks against aggressive opponents).
+
+### Vote Decision
+
+For each community card vote the bot computes MC equity both with and without the current card, then wagers proportional to `|Δequity| × expected_pot × 0.6`. Maximum wager scales with conviction:
+
+| Equity delta | Max wager |
+|---|---|
+| > 0.15 | chips / 4 |
+| > 0.08 | chips / 6 |
+| otherwise | chips / 8 |
+
+Spending more on high-conviction votes lets the bot outweigh opponents on boards where it holds a clear advantage.
+
+### Swap Decision
+
+- **Pre-flop**: uses the Chen hand-strength formula — keep any hand scoring ≥ 7 (or suited ≥ 3), or if the swap cost exceeds chips/8.
+- **Post-flop**: only swaps with no pair and no flush draw, only when cost ≤ chips/6; confirmed by a mini MC comparison.
+
+### Tradeoffs
+
+- **Speed vs. accuracy**: the 10 ms time limit constrains simulation depth; the bot prioritises faster, shallower MC over deeper but slower analysis.
+- **Generalisation**: opponent model defaults are conservative for the first few hands to avoid overfitting early noise.
+- **Multiway vs. heads-up**: semi-bluff and range-discount parameters are tuned to work across both formats.
+
+---
+
+## Original Task Description
+
+> Build a bot that plays Chaos Poker.
+>
+> Implement a bot that communicates with the engine over `stdin` / `stdout` using the protocol in [RULES.md](RULES.md).
+>
+> The code in this repository is provided as a **test harness** for local development.
 
 If the harness implementation or the message-flow example appear to deviate from [RULES.md](RULES.md), the rules in [RULES.md](RULES.md) should be treated as authoritative.
 
