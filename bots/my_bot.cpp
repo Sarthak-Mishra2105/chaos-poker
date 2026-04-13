@@ -400,12 +400,254 @@ float estimate_equity(const std::array<Card, 2>& hole,
         }
     }
     if (sims == 0) return 0.5f;
-    std::cout << "Ran " << sims << " simulations in " 
-         << std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start
-            ).count() << " ms" << std::endl;
     return score_sum / sims;
 }
+
+float estimate_swap_equity(GameState& gs, int swap_idx, int sample_count = 30, 
+int mc_sims = 100, int mc_budget_us = 1500) {
+    auto unseen = build_unseen(gs.hole, gs.community, gs.discarded);
+    int n = (int)unseen.size();
+    if (n == 0) return 0.0f;
+
+    float total = 0.0f;
+    int num_opp = gs.non_folded_opponents();
+    auto start = std::chrono::steady_clock::now();
+    int actual = 0;
+
+    for (int s = 0; s < sample_count && n > 0; s++) {
+        // Check time every 10 samples
+        if (s > 0 && (s % 10) == 0) {
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start
+            ).count();
+            if (us >= mc_budget_us) break;
+        }
+
+        int ri = rng() % n;
+        Card replacement = unseen[ri];
+        auto test_hole = gs.hole;
+        test_hole[swap_idx] = replacement;
+        auto test_disc = gs.discarded;
+        test_disc.push_back(gs.hole[swap_idx]);
+        total += estimate_equity(test_hole, gs.community, test_disc, num_opp, mc_sims, mc_budget_us / sample_count);
+        actual++;
+    }
+    return actual > 0 ? total / actual : 0.0f;
+}
+
+float chen_score(const std::array<Card, 2>& hole) {
+    int r1 = static_cast<int>(hole[0].rank);
+    int r2 = static_cast<int>(hole[1].rank);
+    if (r1 < r2) std::swap(r1, r2);
+    bool suited = (hole[0].suit == hole[1].suit);
+    bool paired = (r1 == r2);
+
+    float score;
+    if (r1 == 14) score = 10;
+    else if (r1 == 13) score = 8;
+    else if (r1 == 12) score = 7;
+    else if (r1 == 11) score = 6;
+    else score = r1 / 2.0f;
+
+    if (paired) {
+        score *=2;
+        if (score < 5) score = 5;
+    }
+    if (suited) score += 2;
+    if (!paired) {
+        int gap = r1 - r2;
+        if (gap == 1) score += 1;
+        else if (gap == 2) score -= 1;
+        else if (gap == 3) score -= 2;
+        else if (gap == 4) score -= 4;
+        else score -= 5;
+    }
+    return score;
+}
+
+std::string decide_swap(GameState& gs, int cost, int my_chips) {
+    if (cost > my_chips / 4) return "STAY";
+    if (gs.swaps_this_phase > 0) return "STAY";
+
+    int r0 = static_cast<int>(gs.hole[0].rank);
+    int r1 = static_cast<int>(gs.hole[1].rank);
+    if (r0 == r1 && r0 >= 7) return "STAY";
+
+    // use monte carlo for post-flop
+    if (!gs.community.empty()) {
+        std::vector<Card> all(gs.community.begin(), gs.community.end());
+        all.push_back(gs.hole[0]);
+        all.push_back(gs.hole[1]);
+        HandScore hs = evaluate_hand(all);
+        if (hs.rank >= HandRank::ONE_PAIR) return "STAY";
+
+        // check flush draws
+        int sm0 = 0, sm1 = 0;
+        for (auto& c: gs.community) {
+            if (c.suit == gs.hole[0].suit) sm0++;
+            if (c.suit == gs.hole[1].suit) sm1++;
+        }
+        if (sm0 >= 3 || sm1 >= 3) return "STAY";
+
+        if (r0 < 10 && r1 < 10 && cost <= my_chips / 6) {
+            int idx = (r0 < r1) ? 0 : 1;
+            float eq_stay = estimate_equity(gs.hole, gs.community, gs.discarded, 
+                gs.non_folded_opponents(), 200, 1500);
+                float eq_swap = estimate_swap_equity(gs, idx);
+                if (eq_swap > eq_stay + 0.03f) return "SWAP " + std::to_string(idx);
+        }
+        return "STAY";
+    }
+
+    // for pre-flop, use chen score
+    float cs = chen_score(gs.hole);
+    bool suited = (gs.hole[0].suit == gs.hole[1].suit);
+    if (cs >= 7) return "STAY";
+    if (cost > my_chips / 8 && cs >= 4) return "STAY";
+    if (suited && cs >= 3) return "STAY";
+
+    int swap_idx = (r0 < r1) ? 0 : 1;
+    return "SWAP " + std::to_string(swap_idx);
+}
+
+std::string decide_vote(GameState& gs, int my_chips) {
+    if (gs.community.empty()) return "VOTE YES 0";
+    int num_opp = gs.non_folded_opponents();
+
+    // check equity with current board
+    float eq_keep = estimate_equity(gs.hole, gs.community, gs.discarded,
+    num_opp, 400, 1500);
+
+    // check equity if board was redrawn
+    std::vector<Card> base_comm;
+    std::vector<Card> disc_if_redrawn = gs.discarded;
+
+    if (gs.street == 1) {
+        // flop redraw, all 3 cards discarded
+        for (auto& c : gs.community) disc_if_redrawn.push_back(c);
+    }
+    else if (gs.street == 2) {
+        // turn redraw, only turn card discarded
+        base_comm.assign(gs.community.begin(), gs.community.begin() + 3);
+        if (gs.community.size() > 3) disc_if_redrawn.push_back(gs.community[3]);
+    }
+    else {
+        // river redraw, flop + turn stay
+        base_comm.assign(gs.community.begin(), gs.community.begin() + 4);
+        if (gs.community.size() > 4) disc_if_redrawn.push_back(gs.community[4]);
+    }
+    
+    float eq_redraw = estimate_equity(gs.hole, base_comm, disc_if_redrawn,
+        num_opp, 400, 1500);
+    float delta = eq_keep - eq_redraw;
+    int pot_est = std::max(gs.pot_estimate, 2 * gs.bb_amount);
+    float swing = std::abs(delta) * pot_est * 0.25;
+    int wager = (std::abs(delta) > 0.05f) ? std::min((int)swing, my_chips / 30) : 0;
+
+    if (delta >= 0) return "VOTE YES " + std::to_string(wager);
+    else return "VOTE NO " + std::to_string(wager);
+}
+
+std::string decide_action(GameState& gs, int chips, int current_bet,
+    int my_bet, int min_raise, int pot) {
+    int to_call = current_bet - my_bet;
+    float eff_bb = (gs.bb_amount > 0) ? (float)chips / gs.bb_amount : 100.0f;
+
+    // estimate equity with monte carlo
+    float equity = estimate_equity(gs.hole, gs.community, gs.discarded, 
+        gs.non_folded_opponents(), 1500, 5500);
+
+    float range_disc = (gs.street == 1) ? 0.02f 
+    : (gs.street == 2) ? 0.03f 
+    : (gs.street == 3) ? 0.04f : 0.0f;
+    equity -= range_disc;
+    
+    // adjust equity based on opponent tendencies
+    float opp_fold = gs.avg_opp_fold_rate();
+    float opp_agg = gs.avg_opp_aggression();
+    bool late_pos = gs.is_late_position();
+
+    // risk factors when chip leader
+    float risk_adjust = gs.is_chip_leader() ? 0.03f : 0.0f;
+
+    float pot_odds = (pot + to_call > 0) ? (float)to_call / (pot + to_call) : 0.0f;
+    float spr = (pot > 0) ? (float)chips / pot : 20.0f;
+
+    // helper to determine safe raise amount
+    auto safe_raise = [&](float frac) {
+        int r = std::max(min_raise, (int)(pot * frac));
+        return std::min(r, chips + my_bet);
+    };
+
+    // short stack (< 10 BB)
+    if (eff_bb < 10) {
+        if (to_call == 0) {
+            return (equity > 0.45f + risk_adjust) ? "ALLIN" : "CHECK";
+        }
+        if (equity > 0.38f + risk_adjust) return "ALLIN";
+        if (equity > pot_odds) return "CALL";
+        return "FOLD";
+    }
+
+    // medium stack (10 to 30 BB)
+    if (eff_bb < 30) {
+        if (to_call == 0) {
+            if (equity > 0.68f + risk_adjust) {
+                int r = safe_raise(0.55f);
+                if (r >= chips + my_bet) return "ALLIN";
+                return "RAISE " + std::to_string(r);
+            }
+            if (equity > 0.50f && late_pos) return "RAISE " + std::to_string(safe_raise(0.35f));
+            return "CHECK";
+        }
+        if (equity > 0.70f + risk_adjust) {
+            int r = safe_raise(0.60f);
+            if (r >= chips + my_bet) return "ALLIN";
+            return "RAISE " + std::to_string(r);
+        }
+        if (equity > pot_odds + 0.02f) {
+            if (to_call >= chips) return "ALLIN";
+            return "CALL";
+        }
+        return "FOLD";
+    }
+
+    // deep stack (> 30 BB)
+    if (to_call == 0) {
+        if (equity > 0.72f + risk_adjust) {
+            float sz = (opp_agg > 1.5f) ? 0.70f : 0.55f;
+            return "RAISE " + std::to_string(safe_raise(sz));
+        }
+        if (equity > 0.55f && spr > 3.0f) {
+            float sz = late_pos ? 0.40f : 0.35f;
+            return "RAISE " + std::to_string(safe_raise(sz));
+        }
+        // semibluff with fold equity
+        if (equity > 0.35f && opp_fold > 0.4f && late_pos) {
+            float bluff_ev = opp_fold * pot + (1-opp_fold)*(equity*(pot+pot*0.4f)-pot*0.4f);
+            if (bluff_ev > equity * pot) {
+                return "RAISE " + std::to_string(safe_raise(0.35f));
+            }
+        }
+        return "CHECK";
+    }
+    // facing a bet (deep)
+    if (equity > 0.75f + risk_adjust && spr > 2.0f) {
+        int r = safe_raise(0.65f);
+        if (r >= chips + my_bet) return "ALLIN";
+        return "RAISE " + std::to_string(r);
+    }
+    if (equity > pot_odds + 0.03f) {
+        if (to_call >= chips) return "ALLIN";
+        return "CALL";
+    }
+    if (equity > pot_odds - 0.08f && spr > 6.0f && equity > 0.25f) {
+        if (to_call >= chips) return "ALLIN";
+        return "CALL";
+    } 
+    return "FOLD";
+}
+
 
 int main() {
     GameState gs;
@@ -451,8 +693,8 @@ int main() {
         else if (cmd == "DEAL_HOLE") {
             std::string c1, c2;
             iss >> c1 >> c2;
-            gs.hole[0] == parse_card(c1);
-            gs.hole[1] == parse_card(c2);
+            gs.hole[0] = parse_card(c1);
+            gs.hole[1] = parse_card(c2);
         }
 
         else if (cmd == "DEAL_FLOP") {
@@ -511,7 +753,60 @@ int main() {
             gs.community.push_back(parse_card(c));
         }
         
-        // TODO: handle decisions
+        // handle decisions
+        else if (cmd == "SWAP_PROMPT") {
+            int cost, my_chips;
+            iss >> cost >> my_chips;
+            gs.chips[gs.my_seat] = my_chips;
+            std::string resp = decide_swap(gs, cost, my_chips);
+            std::cout << resp << std::endl;
+            // track the discarded card and pot, if swapping
+            if (resp.size() >= 6 && resp.substr(0, 4) == "SWAP") {
+                int idx = resp[5] - '0';
+
+                gs.discarded.push_back(gs.hole[idx]);
+                gs.pot_estimate += cost;
+                gs.swaps_this_phase++;
+            }
+        }
+
+        else if (cmd == "SWAP_RESULT") {
+            std::string c;
+            iss >> c;
+            Card new_card = parse_card(c);
+            // replace the card we swapped
+            if (!gs.discarded.empty()) {
+                Card old = gs.discarded.back();
+                if (gs.hole[0] == old) gs.hole[0] = new_card;
+                else gs.hole[1] = new_card;
+            }
+        }
+
+        else if (cmd == "SWAP_DONE") {
+            gs.swaps_this_phase = 0;
+        }
+
+        else if (cmd == "VOTE_PROMPT") {
+            int my_chips;
+            iss >> my_chips;
+            gs.chips[gs.my_seat] = my_chips;
+            std::cout << decide_vote(gs, my_chips) << std::endl;
+        }
+
+        else if (cmd == "VOTE_RESULT") {
+            int yes_total, no_total;
+            std::string outcome;
+            iss >> yes_total >> no_total >> outcome;
+            gs.pot_estimate += yes_total + no_total;
+        }
+
+        else if (cmd == "ACTION_PROMPT") {
+            int chips, current_bet, my_bet, min_raise, pot;
+            iss >> chips >> current_bet >> my_bet >> min_raise >> pot;
+            gs.chips[gs.my_seat] = chips;
+            gs.pot_estimate = pot; // use actual pot from engine for better accuracy
+            std::cout << decide_action(gs, chips, current_bet, my_bet, min_raise, pot) << std::endl;
+        }
 
         else if (cmd == "ACTION") {
             int seat;
